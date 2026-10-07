@@ -30,14 +30,47 @@ import config
 from clients import bot, assistant, LOGGER
 
 
+def _is_peer_error(e: Exception) -> bool:
+    return isinstance(e, ValueError) and "Peer id invalid" in str(e)
+
+
+async def _refresh_assistant_peers():
+    try:
+        async for _ in assistant.get_dialogs():
+            pass
+    except Exception as e:
+        LOGGER.warning(f"Assistant peer refresh fail: {e}")
+
+
 async def is_assistant_in_chat(chat_id: int) -> bool:
-    """Assistant is chat ka member hai ya nahi, seedha check karta hai."""
+    """
+    Assistant is chat ka member hai ya nahi, seedha check karta hai.
+
+    Assistant `in_memory=True` session use karta hai, isliye bot restart hone
+    par uska peer/access_hash cache khaali ho jaata hai. Agar assistant us
+    group mein khud koi update receive nahi karta (sirf VC join karta hai),
+    to pyrogram `get_chat_member` call pe "Peer id invalid" ValueError de
+    deta hai — chahe assistant group mein ho bhi, isliye galat se "nahi hai"
+    bol deta tha. Fix: yeh error aane par ek baar dialogs refresh karke (jo
+    saare peers wapas cache mein le aata hai) dobara try karte hain.
+    """
     try:
         await assistant.get_chat_member(chat_id, "me")
         return True
     except UserNotParticipant:
         return False
     except Exception as e:
+        if _is_peer_error(e):
+            LOGGER.info("Assistant peer cache mein nahi tha — dialogs refresh karke retry.")
+            await _refresh_assistant_peers()
+            try:
+                await assistant.get_chat_member(chat_id, "me")
+                return True
+            except UserNotParticipant:
+                return False
+            except Exception as e2:
+                LOGGER.warning(f"Assistant membership check fail (retry ke baad bhi): {e2}")
+                return False
         LOGGER.warning(f"Assistant membership check fail: {e}")
         return False
 
